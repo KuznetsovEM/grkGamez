@@ -1,0 +1,525 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Космический Шутер с Бесконечными Уровнями</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: black; }
+        canvas { display: block; }
+        .controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            color: white;
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+        }
+        .controls label { display: block; margin-bottom: 2px; }
+        .controls input[type="range"] { width: 80px; }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div class="controls">
+        <label>Скорость врагов: <span id="enemySpeedValue">3.5</span></label>
+        <input type="range" id="enemySpeed" min="1" max="5" step="0.1" value="3.5">
+        <label>Скорость ракет: <span id="rocketSpeedValue">5.0</span></label>
+        <input type="range" id="rocketSpeed" min="2" max="10" step="0.1" value="5">
+    </div>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Адаптация размера канваса
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        // Объект игрока
+        const player = {
+            x: canvas.width / 2,
+            y: canvas.height - 50,
+            width: 40,
+            height: 40,
+            speed: 5,
+            bullets: [],
+            status: [1, 1, 1, 1], // [fireRate, bulletSize, bulletCount, sideShots]
+            lives: 3
+        };
+
+        // Враги, ракеты и усиления
+        const enemies = [];
+        const enemyRockets = [];
+        const powerUps = [];
+        let baseEnemySpeed = 3.5;
+        let rocketSpeed = 5;
+        let lastRocketShot = 0;
+        let powerUpDroppedInWave = false;
+
+        // Пули
+        const bulletSpeed = 7;
+        let lastShot = 0;
+
+        // Управление
+        let touchX = null;
+        let isShooting = false;
+        let gameOver = false;
+
+        // Состояние уровня
+        let currentWaveIndex = 0;
+        let waveStartTime = Date.now();
+        let isWaveActive = false;
+        let currentWaveInfo = '';
+        let endWavePowerUpChance = 0.01; // Начальный шанс 1%
+
+        // Названия паттернов и модификаторов
+        const patternNames = {
+            1: 'Клиновидная',
+            2: 'Горизонтальная',
+            3: 'Большой враг',
+            4: 'Маленькие рои',
+            5: 'Змеевидная'
+        };
+        const modifierNames = {
+            1: 'Обычные',
+            2: 'Усиленные',
+            3: 'Быстрые',
+            4: 'Слаломные',
+            5: 'Целящиеся',
+            6: 'Ракетные'
+        };
+
+        // Типы усилений
+        const powerUpTypes = [
+            { type: 'fireRate', label: 'Скорость', color: 'green' },
+            { type: 'bulletSize', label: 'Размер', color: 'blue' },
+            { type: 'bulletCount', label: 'Multi', color: 'orange' },
+            { type: 'sideShots', label: 'Боковые', color: 'purple' }
+        ];
+
+        // Генерация случайной волны
+        function generateWave(waveIndex) {
+            const patternProbs = waveIndex < 10 ? [0.3, 0.3, 0.2, 0.15, 0.05] : [0.2, 0.2, 0.2, 0.2, 0.2];
+            const modifierProbs = waveIndex < 10 ? [0.3, 0.2, 0.2, 0.15, 0.1, 0.05] : [0.15, 0.15, 0.15, 0.2, 0.2, 0.15];
+            const pattern = weightedRandom([1, 2, 3, 4, 5], patternProbs);
+            const modifier = weightedRandom([1, 2, 3, 4, 5, 6], modifierProbs);
+            const hits = Math.floor(waveIndex / 4) + 1;
+            return [pattern, modifier, hits];
+
+            function weightedRandom(items, weights) {
+                const total = weights.reduce((sum, w) => sum + w, 0);
+                let r = Math.random() * total;
+                for (let i = 0; i < items.length; i++) {
+                    r -= weights[i];
+                    if (r <= 0) return items[i];
+                }
+                return items[items.length - 1];
+            }
+        }
+
+        // Спавн одного усиления
+        function spawnPowerUp(x, y) {
+            if (!powerUpDroppedInWave) {
+                const powerUp = powerUpTypes[Math.floor(Math.random() * powerUpTypes.length)];
+                powerUps.push({
+                    x: x,
+                    y: y,
+                    width: 20,
+                    height: 20,
+                    type: powerUp.type,
+                    label: powerUp.label,
+                    color: powerUp.color
+                });
+                powerUpDroppedInWave = true;
+            }
+        }
+
+        // Спавн усилений в конце волны
+        function spawnEndWavePowerUps() {
+            if (Math.random() < endWavePowerUpChance) {
+                powerUpTypes.forEach(powerUp => {
+                    powerUps.push({
+                        x: Math.random() * (canvas.width - 20),
+                        y: 0,
+                        width: 20,
+                        height: 20,
+                        type: powerUp.type,
+                        label: powerUp.label,
+                        color: powerUp.color
+                    });
+                });
+                endWavePowerUpChance = 0.01; // Сброс шанса
+            } else {
+                endWavePowerUpChance += 0.01; // Увеличение шанса
+            }
+        }
+
+        // Определение паттернов волн
+        function spawnWave(pattern, modifier, hits) {
+            const enemiesInWave = [];
+            let enemyWidth = 30, enemyHeight = 30, speed = baseEnemySpeed;
+            if (modifier === 3) speed *= 2;
+
+            if (pattern === 1) {
+                const centerX = canvas.width / 2;
+                enemiesInWave.push(
+                    { x: centerX - 40, y: 0, width: enemyWidth, height: enemyHeight, hits, speed, modifier, pattern, t: 0 },
+                    { x: centerX, y: -40, width: enemyWidth, height: enemyHeight, hits, speed, modifier, pattern, t: 0 },
+                    { x: centerX + 40, y: 0, width: enemyWidth, height: enemyHeight, hits, speed, modifier, pattern, t: 0 },
+                    { x: centerX - 80, y: 40, width: enemyWidth, height: enemyHeight, hits, speed, modifier, pattern, t: 0 },
+                    { x: centerX + 80, y: 40, width: enemyWidth, height: enemyHeight, hits, speed, modifier, pattern, t: 0 }
+                );
+            } else if (pattern === 2) {
+                const startX = canvas.width / 5;
+                for (let i = 0; i < 4; i++) {
+                    enemiesInWave.push({
+                        x: startX + i * 80,
+                        y: 0,
+                        width: enemyWidth,
+                        height: enemyHeight,
+                        hits,
+                        speed,
+                        modifier,
+                        pattern,
+                        t: 0
+                    });
+                }
+            } else if (pattern === 3) {
+                enemiesInWave.push({
+                    x: canvas.width / 2 - 30,
+                    y: 0,
+                    width: 60,
+                    height: 60,
+                    hits: hits * 2,
+                    speed,
+                    modifier,
+                    pattern,
+                    t: 0
+                });
+            } else if (pattern === 4) {
+                const centerX = canvas.width / 2;
+                for (let i = 0; i < 4; i++) {
+                    enemiesInWave.push(
+                        { x: centerX - 60 + i * 30, y: 0, width: 15, height: 15, hits, speed, modifier, pattern, t: 0 },
+                        { x: centerX + 60 - i * 30, y: 40, width: 15, height: 15, hits, speed, modifier, pattern, t: 0 }
+                    );
+                }
+            } else if (pattern === 5) {
+                const centerX = canvas.width / 2;
+                for (let i = 0; i < 6; i++) {
+                    enemiesInWave.push({
+                        x: centerX,
+                        y: -40 * i,
+                        width: enemyWidth,
+                        height: enemyHeight,
+                        hits,
+                        speed,
+                        modifier,
+                        pattern,
+                        t: i * 0.5
+                    });
+                }
+            }
+            enemies.push(...enemiesInWave);
+            powerUpDroppedInWave = false;
+            currentWaveInfo = `Волна ${currentWaveIndex + 1}: ${patternNames[pattern]} (${modifierNames[modifier]}, ${hits} хит${hits > 1 ? 'а' : ''})`;
+        }
+
+        // Ползунки
+        const enemySpeedSlider = document.getElementById('enemySpeed');
+        const enemySpeedValue = document.getElementById('enemySpeedValue');
+        const rocketSpeedSlider = document.getElementById('rocketSpeed');
+        const rocketSpeedValue = document.getElementById('rocketSpeedValue');
+
+        enemySpeedSlider.addEventListener('input', () => {
+            baseEnemySpeed = parseFloat(enemySpeedSlider.value);
+            enemySpeedValue.textContent = baseEnemySpeed.toFixed(1);
+        });
+
+        rocketSpeedSlider.addEventListener('input', () => {
+            rocketSpeed = parseFloat(rocketSpeedSlider.value);
+            rocketSpeedValue.textContent = rocketSpeed.toFixed(1);
+        });
+
+        // Отрисовка
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Игрок
+            ctx.fillStyle = 'white';
+            ctx.fillRect(player.x, player.y, player.width, player.height);
+
+            // Пули
+            ctx.fillStyle = 'yellow';
+            player.bullets.forEach(bullet => {
+                ctx.fillRect(bullet.x, bullet.y, 5 * player.status[1], 10);
+            });
+
+            // Враги
+            enemies.forEach(enemy => {
+                ctx.fillStyle = enemy.modifier === 1 ? 'red' :
+                                enemy.modifier === 2 ? 'purple' :
+                                enemy.modifier === 3 ? 'orange' :
+                                enemy.modifier === 4 ? 'green' :
+                                enemy.modifier === 5 ? 'cyan' : 'darkred';
+                ctx.fillRect(enemy.x, enemy.y, enemy.width, enemy.height);
+            });
+
+            // Ракеты врагов
+            ctx.fillStyle = 'pink';
+            enemyRockets.forEach(rocket => {
+                ctx.fillRect(rocket.x, rocket.y, 5, 15);
+            });
+
+            // Усиления
+            powerUps.forEach(powerUp => {
+                ctx.fillStyle = powerUp.color;
+                ctx.beginPath();
+                ctx.arc(powerUp.x + powerUp.width / 2, powerUp.y + powerUp.height / 2, powerUp.width / 2, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = 'white';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(powerUp.label, powerUp.x + powerUp.width / 2, powerUp.y - 5);
+            });
+
+            // Информация о волне и жизнях
+            ctx.fillStyle = 'white';
+            ctx.font = '16px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText(currentWaveInfo, 10, 20);
+            ctx.fillText(`Жизни: ${player.lives}`, 10, 40);
+        }
+
+        // Обновление логики
+        function update() {
+            if (gameOver) return;
+
+            // Движение игрока
+            if (touchX !== null) {
+                player.x = touchX - player.width / 2;
+                player.x = Math.max(0, Math.min(canvas.width - player.width, player.x));
+            }
+
+            // Стрельба игрока
+            const fireInterval = 200 / player.status[0];
+            if (isShooting && Date.now() - lastShot > fireInterval) {
+                for (let i = 0; i < player.status[2]; i++) {
+                    player.bullets.push({
+                        x: player.x + player.width / 2 - (2.5 * player.status[1]),
+                        y: player.y - i * 15,
+                        angle: 0
+                    });
+                }
+                if (player.status[3] > 1) {
+                    const angles = player.status[3] === 2 ? [15] : [15, 30];
+                    angles.forEach(angle => {
+                        player.bullets.push(
+                            { x: player.x + player.width / 2, y: player.y, angle: angle * Math.PI / 180 },
+                            { x: player.x + player.width / 2, y: player.y, angle: -angle * Math.PI / 180 }
+                        );
+                    });
+                }
+                lastShot = Date.now();
+            }
+
+            // Ограничение количества пуль
+            if (player.bullets.length > 100) player.bullets.splice(0, player.bullets.length - 100);
+            player.bullets = player.bullets.filter(bullet => bullet.y > 0 && bullet.y < canvas.height && bullet.x > 0 && bullet.x < canvas.width);
+            player.bullets.forEach(bullet => {
+                bullet.y -= bulletSpeed * Math.cos(bullet.angle);
+                bullet.x += bulletSpeed * Math.sin(bullet.angle);
+            });
+
+            // Управление волнами
+            if (!isWaveActive) {
+                if (Date.now() - waveStartTime > 1000) {
+                    const wave = generateWave(currentWaveIndex);
+                    spawnWave(wave[0], wave[1], wave[2]);
+                    isWaveActive = true;
+                    waveStartTime = Date.now();
+                    currentWaveIndex++;
+                }
+            } else if (isWaveActive && enemies.length === 0) {
+                spawnEndWavePowerUps();
+                isWaveActive = false;
+                waveStartTime = Date.now();
+            }
+
+            // Движение врагов
+            enemies.forEach(enemy => {
+                enemy.t += 0.05;
+                let dx = 0, dy = enemy.speed;
+
+                if (enemy.modifier === 4) {
+                    dx = Math.sin(enemy.t * 2) * 5;
+                } else if (enemy.modifier === 5) {
+                    const dxTarget = player.x + player.width / 2 - (enemy.x + enemy.width / 2);
+                    const dyTarget = player.y - (enemy.y + enemy.height);
+                    const distance = Math.sqrt(dxTarget * dxTarget + dyTarget * dyTarget);
+                    if (distance > 10) {
+                        dx = (dxTarget / distance) * enemy.speed;
+                        dy = (dyTarget / distance) * enemy.speed;
+                        dy = Math.max(dy, enemy.speed * 0.5);
+                    }
+                }
+
+                if (enemy.pattern === 5) {
+                    dx += Math.sin(enemy.t * 2) * 50;
+                }
+
+                enemy.x += dx;
+                enemy.y += dy;
+
+                if (enemy.modifier === 6 && Date.now() - (enemy.lastShot || 0) > 500) {
+                    enemyRockets.push({ x: enemy.x + enemy.width / 2 - 2.5, y: enemy.y + enemy.height });
+                    enemy.lastShot = Date.now();
+                }
+            });
+
+            // Ограничение врагов по краям и удаление
+            enemies.forEach(enemy => {
+                enemy.x = Math.max(0, Math.min(canvas.width - enemy.width, enemy.x));
+            });
+            enemies.splice(0, enemies.length, ...enemies.filter(enemy => enemy.y < canvas.height));
+
+            // Движение ракет врагов
+            if (enemyRockets.length > 50) enemyRockets.splice(0, enemyRockets.length - 50);
+            enemyRockets.forEach(rocket => {
+                rocket.y += rocketSpeed;
+            });
+            enemyRockets.splice(0, enemyRockets.length, ...enemyRockets.filter(rocket => rocket.y < canvas.height));
+
+            // Движение усилений
+            if (powerUps.length > 20) powerUps.splice(0, powerUps.length - 20);
+            powerUps.forEach(powerUp => {
+                powerUp.y += 3;
+            });
+            powerUps.splice(0, powerUps.length, ...powerUps.filter(powerUp => powerUp.y < canvas.height));
+
+            // Коллизии с усилениями
+            powerUps.forEach((powerUp, pIndex) => {
+                if (player.x < powerUp.x + powerUp.width &&
+                    player.x + player.width > powerUp.x &&
+                    player.y < powerUp.y + powerUp.height &&
+                    player.y + player.height > powerUp.y) {
+                    const index = ['fireRate', 'bulletSize', 'bulletCount', 'sideShots'].indexOf(powerUp.type);
+                    if (player.status[index] < 3) player.status[index]++;
+                    powerUps.splice(pIndex, 1);
+                }
+            });
+
+            // Коллизии с врагами и ракетами
+            enemies.forEach((enemy, eIndex) => {
+                if (player.x < enemy.x + enemy.width &&
+                    player.x + player.width > enemy.x &&
+                    player.y < enemy.y + enemy.height &&
+                    player.y + player.height > enemy.y) {
+                    player.lives--;
+                    enemies.splice(eIndex, 1);
+                    if (player.lives <= 0) gameOver = true;
+                }
+                player.bullets.forEach((bullet, bIndex) => {
+                    if (bullet.x < enemy.x + enemy.width &&
+                        bullet.x + 5 * player.status[1] > enemy.x &&
+                        bullet.y < enemy.y + enemy.height &&
+                        bullet.y + 10 > enemy.y) {
+                        enemy.hits--;
+                        player.bullets.splice(bIndex, 1);
+                        if (enemy.hits <= 0) {
+                            if (Math.random() < 0.05) spawnPowerUp(enemy.x, enemy.y);
+                            enemies.splice(eIndex, 1);
+                        }
+                    }
+                });
+            });
+
+            enemyRockets.forEach((rocket, rIndex) => {
+                if (player.x < rocket.x + 5 &&
+                    player.x + player.width > rocket.x &&
+                    player.y < rocket.y + 15 &&
+                    player.y + player.height > rocket.y) {
+                    player.lives--;
+                    enemyRockets.splice(rIndex, 1);
+                    if (player.lives <= 0) gameOver = true;
+                }
+            });
+        }
+
+        // Игровой цикл
+        function gameLoop() {
+            update();
+            draw();
+            if (!gameOver) {
+                requestAnimationFrame(gameLoop);
+            } else {
+                ctx.fillStyle = 'white';
+                ctx.font = '30px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(`Игра окончена (Волна ${currentWaveIndex})`, canvas.width / 2, canvas.height / 2);
+            }
+        }
+
+        // Обработка сенсорного ввода
+        canvas.addEventListener('touchstart', e => {
+            touchX = e.touches[0].clientX;
+            isShooting = true;
+            e.preventDefault();
+        });
+
+        canvas.addEventListener('touchmove', e => {
+            touchX = e.touches[0].clientX;
+            e.preventDefault();
+        });
+
+        canvas.addEventListener('touchend', () => {
+            touchX = null;
+            isShooting = false;
+        });
+
+        // Старт игры
+        gameLoop();
+    </script>
+</body>
+</html>
